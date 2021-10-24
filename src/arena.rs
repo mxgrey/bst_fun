@@ -46,7 +46,7 @@ impl<'a, Node> Arena<Node> {
         if let Some(node) = &mut self.nodes[index] {
             return node;
         } else {
-            panic!("Request access to a dead node: {}", index);
+            panic!("Requested mutable access to a dead node: {}", index);
         }
     }
 }
