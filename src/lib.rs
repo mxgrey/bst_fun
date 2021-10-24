@@ -18,7 +18,7 @@ struct Node<Key: PartialOrd, Payload> {
     right_child : Option<usize>
 }
 
-enum TraverseInsert {
+enum TraverseTowards {
     Next(usize),
     InsertLeft,
     InsertRight,
@@ -27,29 +27,29 @@ enum TraverseInsert {
 
 impl<Key: PartialOrd, Payload> Node<Key, Payload> {
 
-    fn traverse_towards<Query>(&self, search: &Query) -> TraverseInsert
+    fn traverse_towards<Query>(&self, search: &Query) -> TraverseTowards
     where
         Key: std::borrow::Borrow<Query> + PartialOrd<Query>,
         Query: PartialOrd<Key> + ?Sized
     {
         if self.content.key < *search {
             if let Some(right) = self.right_child {
-                return TraverseInsert::Next(right);
+                return TraverseTowards::Next(right);
             }
 
-            return TraverseInsert::InsertRight;
+            return TraverseTowards::InsertRight;
         }
         else if *search < self.content.key {
             if let Some(left) = self.left_child {
-                return TraverseInsert::Next(left);
+                return TraverseTowards::Next(left);
             }
 
-            return TraverseInsert::InsertLeft;
+            return TraverseTowards::InsertLeft;
         }
 
         // The current node is the intended one, so we will tell them to
         // insert the payload here if desired
-        return TraverseInsert::Current;
+        return TraverseTowards::Current;
     }
 
     fn fall_min(
@@ -140,10 +140,10 @@ impl<'g, Key: PartialOrd + Display, Payload: Display> BinarySearchTree<Key, Payl
             loop {
                 let next = self.storage.view(node).traverse_towards(&key);
                 match next {
-                    TraverseInsert::Next(n) => {
+                    TraverseTowards::Next(n) => {
                         node = n;
                     },
-                    TraverseInsert::InsertLeft => {
+                    TraverseTowards::InsertLeft => {
                         let new_left_child =
                             Some(Node::new(&mut self.storage, key, payload, Some(node)));
 
@@ -154,7 +154,7 @@ impl<'g, Key: PartialOrd + Display, Payload: Display> BinarySearchTree<Key, Payl
                             iterator: BSTIterator{storage: &self.storage, node: new_left_child }
                         };
                     },
-                    TraverseInsert::InsertRight => {
+                    TraverseTowards::InsertRight => {
                         let new_right_child =
                             Some(Node::new(&mut self.storage, key, payload, Some(node)));
 
@@ -165,7 +165,7 @@ impl<'g, Key: PartialOrd + Display, Payload: Display> BinarySearchTree<Key, Payl
                             iterator: BSTIterator{ storage: &self.storage, node: new_right_child }
                         };
                     },
-                    TraverseInsert::Current => {
+                    TraverseTowards::Current => {
                         return InsertionResult{
                             inserted: false,
                             iterator: BSTIterator{ storage: &self.storage, node: Some(node) }
@@ -190,17 +190,17 @@ impl<'g, Key: PartialOrd + Display, Payload: Display> BinarySearchTree<Key, Payl
             loop {
                 let next = self.storage.view(node).traverse_towards(&query);
                 match next {
-                    TraverseInsert::Next(n) => {
+                    TraverseTowards::Next(n) => {
                         node = n;
                     },
-                    TraverseInsert::Current => {
+                    TraverseTowards::Current => {
                         self.remove_node(node);
                         return true;
                     },
-                    TraverseInsert::InsertLeft => {
+                    TraverseTowards::InsertLeft => {
                         return false;
                     },
-                    TraverseInsert::InsertRight => {
+                    TraverseTowards::InsertRight => {
                         return false;
                     }
                 }
