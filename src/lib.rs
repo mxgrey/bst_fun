@@ -1,10 +1,10 @@
-
+use std::fmt::Display;
 use std::cmp::PartialOrd;
-use std::rc::{Rc, Weak};
-use std::cell::RefCell;
 
-type NodeRef<Key, Payload> = Rc<RefCell<Node<Key, Payload>>>;
-type NodeWeak<Key, Payload> = Weak<RefCell<Node<Key, Payload>>>;
+mod arena;
+use arena::Arena;
+
+type Storage<Key, Payload> = Arena<Node<Key, Payload>>;
 
 pub struct Content<Key, Payload> {
     key: Key,
@@ -12,14 +12,14 @@ pub struct Content<Key, Payload> {
 }
 
 struct Node<Key: PartialOrd, Payload> {
-    content: Rc<Content<Key, Payload>>,
-    parent: Option<NodeWeak<Key, Payload>>,
-    left_child: Option<NodeRef<Key, Payload>>,
-    right_child : Option<NodeRef<Key, Payload>>
+    content: Content<Key, Payload>,
+    parent: Option<usize>,
+    left_child: Option<usize>,
+    right_child : Option<usize>
 }
 
-enum FindOrInsert<Key: PartialOrd, Payload> {
-    Next(NodeRef<Key, Payload>),
+enum TraverseInsert {
+    Next(usize),
     InsertLeft,
     InsertRight,
     Current
@@ -27,142 +27,269 @@ enum FindOrInsert<Key: PartialOrd, Payload> {
 
 impl<Key: PartialOrd, Payload> Node<Key, Payload> {
 
-    fn find_or_insert_step(&self, search: &Key) -> FindOrInsert<Key, Payload> {
+    fn traverse_towards<Query>(&self, search: &Query) -> TraverseInsert
+    where
+        Key: std::borrow::Borrow<Query> + PartialOrd<Query>,
+        Query: PartialOrd<Key> + ?Sized
+    {
         if self.content.key < *search {
-            if let Some(right) = &self.right_child {
-                return FindOrInsert::Next(right.clone());
+            if let Some(right) = self.right_child {
+                return TraverseInsert::Next(right);
             }
 
-            return FindOrInsert::InsertRight;
+            return TraverseInsert::InsertRight;
         }
         else if *search < self.content.key {
-            if let Some(left) = &self.left_child {
-                return FindOrInsert::Next(left.clone());
+            if let Some(left) = self.left_child {
+                return TraverseInsert::Next(left);
             }
 
-            return FindOrInsert::InsertLeft;
+            return TraverseInsert::InsertLeft;
         }
 
         // The current node is the intended one, so we will tell them to
         // insert the payload here if desired
-        return FindOrInsert::Current;
+        return TraverseInsert::Current;
     }
 
-    fn fall(mut current_node: NodeRef<Key, Payload>) -> NodeRef<Key, Payload> {
+    fn fall_min(
+        storage: &Storage<Key, Payload>,
+        mut current_node_index: usize
+    ) -> usize {
         loop {
-            let check_left = current_node.borrow().left_child.clone();
-            if let Some(left) = check_left {
-                current_node = left;
+            let current_node = storage.view(current_node_index);
+            if let Some(left) = current_node.left_child {
+                current_node_index = left;
             } else {
-                return current_node;
+                return current_node_index;
             }
         }
     }
 
-    fn climb(mut from_node: NodeRef<Key, Payload>) -> Option<NodeRef<Key, Payload>> {
+    fn fall_max(
+        storage: &Storage<Key, Payload>,
+        mut current_node_index: usize
+    ) -> usize {
         loop {
-            let check_to_node = from_node.borrow().parent.clone();
-            if let Some(opt_to_node) = check_to_node {
-                if let Some(to_node) = opt_to_node.upgrade() {
-                    let right_child_opt = to_node.borrow().right_child.clone();
-                    if let Some(right_child) = right_child_opt {
-                        if Rc::ptr_eq(&right_child, &from_node) {
-                            from_node = to_node;
-                            continue;
-                        }
-                    }
+            let current_node = storage.view(current_node_index);
+            if let Some(right) = current_node.right_child {
+                current_node_index = right;
+            } else {
+                return current_node_index;
+            }
+        }
+    }
 
-                    return Some(to_node);
+    fn climb(
+        storage: &Storage<Key, Payload>,
+        mut from_node_index: usize
+    ) -> Option<usize> {
+        loop {
+            let from_node = storage.view(from_node_index);
+            let check_to_node_index = from_node.parent;
+            if let Some(to_node_index) = check_to_node_index {
+                let to_node = storage.view(to_node_index);
+                if let Some(right_child_index) = to_node.right_child {
+                    if right_child_index == from_node_index {
+                        from_node_index = to_node_index;
+                        continue;
+                    }
                 }
+
+                return Some(to_node_index);
             }
 
             return None;
         }
     }
 
-    fn new(key: Key, payload: Payload, parent: Option<NodeWeak<Key, Payload>>)
-    -> NodeRef<Key, Payload> {
-        return Rc::new(
-            RefCell::new(
-                Node{
-                    content: Rc::new(Content{key: key, payload: payload}),
-                    parent: parent,
-                    left_child: None,
-                    right_child: None
-                }
-            )
-        )
+    fn new(
+        storage: &mut Storage<Key, Payload>,
+        key: Key,
+        payload: Payload,
+        parent: Option<usize>,
+    ) -> usize {
+        return storage.alloc(
+            Node{
+                content: Content{key: key, payload: payload},
+                parent: parent,
+                left_child: None,
+                right_child: None
+            }
+        );
     }
 }
 
 pub struct BinarySearchTree<Key: PartialOrd, Payload> {
-    root: Option<NodeRef<Key, Payload>>
+    storage: Storage<Key, Payload>,
+    root: Option<usize>,
 }
 
-impl<Key: PartialOrd + std::fmt::Display, Payload: std::fmt::Display> BinarySearchTree<Key, Payload> {
+impl<'g, Key: PartialOrd + Display, Payload: Display> BinarySearchTree<Key, Payload> {
 
     pub fn new() -> BinarySearchTree<Key, Payload> {
         return BinarySearchTree{
-            root: None
+            storage: Arena::new(),
+            root: None,
         };
     }
 
-    pub fn insert(&mut self, key: Key, payload: Payload) -> InsertionResult<Key, Payload> {
+    pub fn insert(&'g mut self, key: Key, payload: Payload) -> InsertionResult<'g, Key, Payload> {
 
-        if let Some(mut node) = self.root.clone() {
+        if let Some(mut node) = self.root {
             loop {
-                let next = (*node).borrow().find_or_insert_step(&key);
+                let next = self.storage.view(node).traverse_towards(&key);
                 match next {
-                    FindOrInsert::Next(n) => {
+                    TraverseInsert::Next(n) => {
                         node = n;
                     },
-                    FindOrInsert::InsertLeft => {
-                        let new_node = Node::new(key, payload, Some(Rc::downgrade(&node)));
-                        node.borrow_mut().left_child = Some(new_node.clone());
+                    TraverseInsert::InsertLeft => {
+                        let new_left_child =
+                            Some(Node::new(&mut self.storage, key, payload, Some(node)));
+
+                        self.storage.modify(node).left_child = new_left_child;
+
                         return InsertionResult{
                             inserted: true,
-                            iterator: BSTIterator{ node: Some(new_node) }
+                            iterator: BSTIterator{storage: &self.storage, node: new_left_child }
                         };
                     },
-                    FindOrInsert::InsertRight => {
-                        let new_node = Node::new(key, payload, Some(Rc::downgrade(&node)));
-                        node.borrow_mut().right_child = Some(new_node.clone());
+                    TraverseInsert::InsertRight => {
+                        let new_right_child =
+                            Some(Node::new(&mut self.storage, key, payload, Some(node)));
+
+                        self.storage.modify(node).right_child = new_right_child;
+
                         return InsertionResult{
                             inserted: true,
-                            iterator: BSTIterator{ node: Some(new_node) }
+                            iterator: BSTIterator{ storage: &self.storage, node: new_right_child }
                         };
                     },
-                    FindOrInsert::Current => {
+                    TraverseInsert::Current => {
                         return InsertionResult{
                             inserted: false,
-                            iterator: BSTIterator{ node: Some(node) }
+                            iterator: BSTIterator{ storage: &self.storage, node: Some(node) }
                         };
                     }
                 }
             }
         } else {
-            self.root = Some(Node::new(key, payload, None));
+            self.root = Some(Node::new(&mut self.storage, key, payload, None));
             return InsertionResult{
                 inserted: true,
-                iterator: BSTIterator{ node: self.root.clone() }
+                iterator: BSTIterator{ storage: &self.storage, node: self.root }
             };
         }
     }
 
-    pub fn iter(&self) -> BSTIterator<Key, Payload> {
-        if let Some(root) = &self.root {
-            return BSTIterator{ node: Some(Node::fall(root.clone())) };
+    pub fn remove<Query>(&mut self, query: &Query) -> bool
+    where
+        Key: std::borrow::Borrow<Query> + PartialOrd<Query>,
+        Query: PartialOrd<Key> + ?Sized {
+        if let Some(mut node) = self.root {
+            loop {
+                let next = self.storage.view(node).traverse_towards(&query);
+                match next {
+                    TraverseInsert::Next(n) => {
+                        node = n;
+                    },
+                    TraverseInsert::Current => {
+                        self.remove_node(node);
+                        return true;
+                    },
+                    TraverseInsert::InsertLeft => {
+                        return false;
+                    },
+                    TraverseInsert::InsertRight => {
+                        return false;
+                    }
+                }
+            }
+        }
+
+        return false;
+    }
+
+    fn remove_node(&mut self, node_index: usize) {
+        let to_remove = self.storage.view(node_index);
+        let check_parent = to_remove.parent;
+        let check_left = to_remove.left_child;
+        let check_right = to_remove.right_child;
+        self.storage.remove(node_index);
+
+        if let Some(parent_index) = check_parent {
+            let new_child = self.rebuild_tree(check_left, check_right, Some(parent_index));
+            let parent_node = self.storage.modify(parent_index);
+            if let Some(old_left) = parent_node.left_child {
+                if old_left == node_index {
+                    parent_node.left_child = new_child;
+                    return;
+                }
+            }
+
+            if let Some(old_right) = parent_node.right_child {
+                if old_right == node_index {
+                    parent_node.right_child = new_child;
+                    return;
+                }
+            }
+
+            panic!(
+                "Broken tree! Could not find child {} in node {}. left:{:?}, right:{:?}",
+                node_index,
+                parent_index,
+                parent_node.left_child,
+                parent_node.right_child
+            );
         } else {
-            return BSTIterator{ node: None };
+            self.root = self.rebuild_tree(check_left, check_right, None);
+        }
+    }
+
+    fn rebuild_tree(
+        &mut self,
+        check_left: Option<usize>,
+        check_right: Option<usize>,
+        new_parent: Option<usize>
+    ) -> Option<usize> {
+        if let Some(left) = check_left {
+            // We will let the left node take the place of its parent
+            self.storage.modify(left).parent = new_parent;
+            if let Some(right) = check_right {
+                // If there was a right node, then we will move it to be a child
+                // of the max node in the left subtree.
+                let left_max_index = Node::fall_max(&self.storage, left);
+                self.storage.modify(left_max_index).right_child = Some(right);
+                self.storage.modify(right).parent = Some(left_max_index);
+            }
+
+            return Some(left);
+        } else if let Some(right) = check_right {
+            // We will let the right node take the place of the parent
+            self.storage.modify(right).parent = new_parent;
+            return Some(right);
+        } else {
+            // If the removed node has no left or right child, then simply
+            // clear its position.
+            return None;
+        }
+    }
+
+    pub fn iter(&'g self) -> BSTIterator<'g, Key, Payload> {
+        if let Some(root) = self.root {
+            return BSTIterator{ storage: &self.storage, node: Some(Node::fall_min(&self.storage, root)) };
+        } else {
+            return BSTIterator{ storage: &self.storage, node: None };
         }
     }
 
     pub fn print_root(&self) {
-        if let Some(root) = &self.root {
+        if let Some(root) = self.root {
+            let root_node = self.storage.view(root);
             println!(
                 "root: key: {} | value: {}",
-                &root.borrow().content.key,
-                &root.borrow().content.payload
+                &root_node.content.key,
+                &root_node.content.payload
             );
         } else {
             println!("There is no root!");
@@ -170,19 +297,31 @@ impl<Key: PartialOrd + std::fmt::Display, Payload: std::fmt::Display> BinarySear
     }
 }
 
-pub struct BSTIterator<Key: PartialOrd + std::fmt::Display, Payload> {
-    node: Option<NodeRef<Key, Payload>>
+pub struct BSTIterator<'g, Key: PartialOrd + Display, Payload> {
+    storage: &'g Arena<Node<Key, Payload>>,
+    node: Option<usize>
 }
 
-impl<Key: PartialOrd + std::fmt::Display, Payload> Iterator for BSTIterator<Key, Payload> {
-    type Item = Rc<Content<Key, Payload>>;
+impl<'g, Key: PartialOrd + Display, Payload> BSTIterator<'g, Key, Payload> {
+    pub fn view(&self) -> Option<&'g Content<Key, Payload>> {
+        if let Some(node_index) = self.node {
+            return Some(&self.storage.view(node_index).content);
+        } else {
+            return None;
+        }
+    }
+}
+
+impl<'g, Key: PartialOrd + Display, Payload> Iterator for BSTIterator<'g, Key, Payload> {
+    type Item = &'g Content<Key, Payload>;
     fn next(&mut self) -> Option<Self::Item> {
-        if let Some(current_node) = self.node.clone() {
-            let result = current_node.borrow().content.clone();
-            if let Some(right) = current_node.borrow().right_child.clone() {
-                self.node = Some(Node::fall(right));
+        if let Some(current_node_index) = self.node {
+            let current_node = self.storage.view(current_node_index);
+            let result = &current_node.content;
+            if let Some(right) = current_node.right_child {
+                self.node = Some(Node::fall_min(&self.storage, right));
             } else {
-                self.node = Node::climb(current_node.clone());
+                self.node = Node::climb(&self.storage, current_node_index);
             }
 
             return Some(result);
@@ -192,9 +331,9 @@ impl<Key: PartialOrd + std::fmt::Display, Payload> Iterator for BSTIterator<Key,
     }
 }
 
-pub struct InsertionResult<Key: PartialOrd + std::fmt::Display, Payload> {
+pub struct InsertionResult<'g, Key: PartialOrd + Display, Payload> {
     inserted: bool,
-    iterator: BSTIterator<Key, Payload>
+    iterator: BSTIterator<'g, Key, Payload>
 }
 
 #[cfg(test)]
@@ -208,8 +347,9 @@ mod tests {
 
         let general_kenobi_insert = tree.insert(String::from("General"), String::from("Kenobi"));
         assert!(general_kenobi_insert.inserted);
-        if let Some(node) = &general_kenobi_insert.iterator.node {
-            assert!(node.borrow().content.key == "General");
+        if let Some(content) = general_kenobi_insert.iterator.view() {
+            assert!(content.key == "General");
+            println!("Yes, we have the General!");
         }
 
         tree.insert(String::from("Anakin"), String::from("Skywalker"));
@@ -219,6 +359,14 @@ mod tests {
         tree.print_root();
 
         println!("Print in order...");
+        for n in tree.iter() {
+            println!("key: {} | value: {}", n.key, n.payload);
+        }
+
+        tree.remove(&String::from("General"));
+
+        println!("After removing General...");
+
         for n in tree.iter() {
             println!("key: {} | value: {}", n.key, n.payload);
         }
